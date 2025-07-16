@@ -32,7 +32,7 @@
 import AudioMotionAnalyzer from 'audiomotion-analyzer';
 import packageJson from '../package.json';
 import * as fileExplorer from './file-explorer.js';
-import * as mm from 'music-metadata-browser';
+import { parseBlob, parseWebStream } from 'music-metadata';
 import './scrollIntoViewIfNeeded-polyfill.js';
 import { get, set, del } from 'idb-keyval';
 
@@ -1160,50 +1160,46 @@ function addMetadata( metadata, target ) {
  * @param {object} { album, artist, codec, duration, title }
  * @returns {Promise} resolves to 1 when song added, or 0 if queue is full
  */
-function addSongToPlayQueue( fileObject, content ) {
+async function addSongToPlayQueue( fileObject, content ) {
 
-	return new Promise( resolve => {
-		if ( queueLength() >= MAX_QUEUED_SONGS ) {
-			resolve(0);
-			return;
-		}
+	if ( queueLength() >= MAX_QUEUED_SONGS ) {
+		return 0;
+	}
 
-		const { fileName, baseName, extension } = parsePath( fileExplorer.decodeChars( fileObject.file ) ),
-			  uri       = normalizeSlashes( fileObject.file ),
-			  newEl     = document.createElement('li'), // create new list element
-			  trackData = newEl.dataset;
+	const { fileName, baseName, extension } = parsePath( fileExplorer.decodeChars( fileObject.file ) ),
+		  uri       = normalizeSlashes( fileObject.file ),
+		  newEl     = document.createElement('li'), // create new list element
+		  trackData = newEl.dataset;
 
-		Object.assign( trackData, DATASET_TEMPLATE ); // initialize element's dataset attributes
+	Object.assign( trackData, DATASET_TEMPLATE ); // initialize element's dataset attributes
 
-		if ( ! content )
-			content = parseTrackName( baseName );
+	if ( ! content )
+		content = parseTrackName( baseName );
 
-		trackData.album    = content.album || '';
-		trackData.artist   = content.artist || '';
-		trackData.title    = content.title || fileName || uri.slice( uri.lastIndexOf('//') + 2 );
-		trackData.duration = content.duration || '';
-		trackData.codec    = content.codec || extension.toUpperCase();
+	trackData.album    = content.album || '';
+	trackData.artist   = content.artist || '';
+	trackData.title    = content.title || fileName || uri.slice( uri.lastIndexOf('//') + 2 );
+	trackData.duration = content.duration || '';
+	trackData.codec    = content.codec || extension.toUpperCase();
 
-		trackData.file     = uri; 				// for web server access
-		newEl.handle       = fileObject.handle; // for File System API access
-		newEl.subs         = fileObject.subs;
+	trackData.file     = uri; 				// for web server access
+	newEl.handle       = fileObject.handle; // for File System API access
+	newEl.subs         = fileObject.subs;
 
-		playlist.appendChild( newEl );
+	playlist.appendChild( newEl );
 
-		if ( FILE_EXT_AUDIO.includes( extension ) || ! extension ) {
-			// disable retrieving metadata of video files for now - https://github.com/Borewit/music-metadata-browser/issues/950
-			trackData.retrieve = 1; // flag this item as needing metadata
-			retrieveMetadata();
-		}
+	if ( FILE_EXT_AUDIO.includes( extension ) || ! extension ) {
+		// disable retrieving metadata of video files for now - https://github.com/Borewit/music-metadata-browser/issues/950
+		trackData.retrieve = 1; // flag this item as needing metadata
+		await retrieveMetadata();
+	}
 
-		if ( queueLength() == 1 && ! isPlaying() )
-			loadSong(0).then( () => resolve(1) );
-		else
-			resolve(1);
-
+	if ( queueLength() === 1 && ! isPlaying() ) {
+		await loadSong(0);
 		if ( playlistPos > queueLength() - 3 )
-			loadNextSong();
-	});
+			await loadNextSong(); // ToDo: this was executed in parallel with loadSong
+	}
+	return 1;
 }
 
 /**
@@ -1693,38 +1689,38 @@ async function fullscreen() {
 /**
  * Try to get a cover image from the song's folder
  */
-function getFolderCover( uri ) {
-	return new Promise( resolve => {
-		const path = parsePath( uri ).path; // extract path (no filename)
+async function getFolderCover( uri ) {
+	const path = parsePath( uri ).path; // extract path (no filename)
 
-		if ( serverMode == SERVER_FILE || isExternalURL( uri ) )
-			resolve(''); // nothing to do when in serverless mode or external file
-		else if ( folderImages[ path ] !== undefined )
-			resolve( queryFile( path + folderImages[ path ] ) ); // use the stored image URL for this path
-		else {
-			const urlToFetch = ( serverMode == SERVER_CUSTOM ) ? ROUTE_COVER + encodeSlashes( path ) : path;
+	if ( serverMode === SERVER_FILE || isExternalURL( uri ) )
+		return ''; // nothing to do when in serverless mode or external file
+	else if ( folderImages[ path ] !== undefined )
+		return queryFile( path + folderImages[ path ] ); // use the stored image URL for this path
+	else {
+		try {
+			const urlToFetch = ( serverMode === SERVER_CUSTOM ) ? ROUTE_COVER + encodeSlashes( path ) : path;
 
-			fetch( urlToFetch )
-				.then( response => {
-					return response.ok ? response.text() : null;
-				})
-				.then( content => {
-					let imageUrl = '';
-					if ( content ) {
-						if ( serverMode == SERVER_CUSTOM )
-							imageUrl = content;
-						else {
-							const dirContents = fileExplorer.parseDirectory( content );
-							if ( dirContents.cover )
-								imageUrl = dirContents.cover;
-						}
+			const response = await fetch( urlToFetch );
+			if (response.ok) {
+				const content = await response.text();
+				let imageUrl = '';
+				if (content) {
+					if ( serverMode === SERVER_CUSTOM )
+						imageUrl = content;
+					else {
+						const dirContents = fileExplorer.parseDirectory( content );
+						if ( dirContents.cover )
+							imageUrl = dirContents.cover;
 					}
-					folderImages[ path ] = imageUrl;
-					resolve( queryFile( path + imageUrl ) );
-				})
-				.catch( e => resolve('') );
+				}
+				folderImages[ path ] = imageUrl;
+				return queryFile( path + imageUrl );
+			}
+		} catch (e) {
+			consoleLog(`Failed to fetch cover from ${uri}`);
+			return '';
 		}
-	});
+	}
 }
 
 /**
@@ -1943,7 +1939,7 @@ function keyboardControls( event ) {
 }
 
 /**
- * Sets (or removes) the `src` attribute of a audio element and
+ * Sets (or removes) the `src` attribute of an audio element and
  * releases any data blob (File System API) previously in use by it
  *
  * @param {object} audio element
@@ -1971,16 +1967,33 @@ function loadAudioSource( audioEl, newSource ) {
  * @param {boolean}   `true` to start playing
  * @returns {Promise} resolves to a string containing the URL created for the blob
  */
-function loadFileBlob( fileBlob, audioEl, playIt ) {
-	return new Promise( resolve => {
-		const url = URL.createObjectURL( fileBlob );
-		loadAudioSource( audioEl, url );
+function loadFileBlob(fileBlob, audioEl, playIt) {
+	return new Promise((resolve, reject) => {
+		const url = URL.createObjectURL(fileBlob);
+		loadAudioSource(audioEl, url);
+
+		// Success handler
 		audioEl.onloadeddata = () => {
-			if ( playIt )
-				audioEl.play();
-			audioEl.onloadeddata = null;
-			resolve( url );
+			cleanup();
+			if (playIt) {
+				audioEl.play().catch(err => {
+					consoleLog("Playback failed:", err);
+				});
+			}
+			resolve(url);
 		};
+
+		// Error handler
+		audioEl.onerror = () => {
+			cleanup();
+			reject(new Error("Failed to load audio from Blob"));
+		};
+
+		// Cleanup to avoid memory leaks
+		function cleanup() {
+			audioEl.onloadeddata = null;
+			audioEl.onerror = null;
+		}
 	});
 }
 
@@ -2019,7 +2032,8 @@ function loadGradientIntoCurrentGradient(gradientKey) {
 /**
  * Load a music file from the user's computer
  */
-function loadLocalFile( obj ) {
+async function loadLocalFile( obj ) {
+
 	const fileBlob = obj.files[0];
 
 	if ( fileBlob ) {
@@ -2028,11 +2042,14 @@ function loadLocalFile( obj ) {
 		audioEl.dataset.file = fileBlob.name;
 		audioEl.dataset.title = parsePath( fileBlob.name ).baseName;
 
-		// load and play
-		loadFileBlob( fileBlob, audioEl, true )
-			.then( url => mm.fetchFromUrl( url ) )
-			.then( metadata => addMetadata( metadata, audioEl ) )
-			.catch( e => {} );
+		try {
+			await loadFileBlob( fileBlob, audioEl, true );
+			// Maybe do this parallel?
+			const metadata = await parseBlob( fileBlob );
+			await addMetadata( metadata, audioEl );
+		} catch( error ) {
+			consoleLog("Failed to load local file", error);
+		}
 	}
 }
 
@@ -2053,13 +2070,13 @@ async function loadNextSong() {
 				await song.handle.requestPermission();
 			}
 			catch( e ) {}
-			song.handle.getFile()
-				.then( fileBlob => loadFileBlob( fileBlob, audioEl ) )
-				.then( () => audioEl.load() )
-				.catch( e => {
-					consoleLog( `Error loading ${ song.dataset.file }`, true );
-					clearAudioElement( nextAudio );
-				});
+			try {
+				const fileBlob = await song.handle.getFile();
+				await loadFileBlob( fileBlob, audioEl );
+			} catch( e ) {
+				consoleLog( `Error loading ${ song.dataset.file }`, true );
+				clearAudioElement( nextAudio );
+			}
 		}
 		else {
 			loadAudioSource( audioEl, song.dataset.file );
@@ -2537,49 +2554,51 @@ async function loadSavedPlaylists( keyName ) {
  * @param {boolean}   `true` to start playing
  * @returns {Promise} resolves to a boolean indicating success or failure (invalid queue index)
  */
-function loadSong( n, playIt ) {
-	return new Promise( async resolve => {
-		const audioEl = audioElement[ currAudio ];
-		const finish = () => {
-			updatePlaylistUI();
-			loadNextSong();
-			resolve( true );
+async function loadSong( n, playIt ) {
+
+	const audioEl = audioElement[ currAudio ];
+	const finish = async () => {
+		updatePlaylistUI();
+		await loadNextSong();
+		return true;
+	}
+
+	if ( playlist.children[ n ] ) {
+		playlistPos = n;
+		const song = playlist.children[ playlistPos ];
+		addMetadata( song, audioEl );
+
+		if ( song.handle ) {
+			try {
+				await song.handle.requestPermission();
+			}
+			catch( e ) {
+				consoleLog("Request permission failed:", e);
+			}
+			try {
+				const fileBlob = await song.handle.getFile();
+				await loadFileBlob( fileBlob, audioEl, playIt );
+				await finish();
+			} catch( e ) {
+				consoleLog( `Error loading ${ song.dataset.file }`, true );
+				clearAudioElement( currAudio );
+				return false;
+			}
+		}
+		else {
+			loadAudioSource( audioEl, song.dataset.file );
+			audioEl.onloadeddata = () => {
+				if ( playIt )
+					audioEl.play();
+				audioEl.onloadeddata = null;
+				finish();
+			};
 		}
 
-		if ( playlist.children[ n ] ) {
-			playlistPos = n;
-			const song = playlist.children[ playlistPos ];
-			addMetadata( song, audioEl );
-
-			if ( song.handle ) {
-				try {
-					await song.handle.requestPermission();
-				}
-				catch( e ) {}
-				song.handle.getFile()
-					.then( fileBlob => loadFileBlob( fileBlob, audioEl, playIt ) )
-					.then( () => finish() )
-					.catch( e => {
-						consoleLog( `Error loading ${ song.dataset.file }`, true );
-						clearAudioElement( currAudio );
-						resolve( false );
-					});
-			}
-			else {
-				loadAudioSource( audioEl, song.dataset.file );
-				audioEl.onloadeddata = () => {
-					if ( playIt )
-						audioEl.play();
-					audioEl.onloadeddata = null;
-					finish();
-				};
-			}
-
-			loadSubs( audioEl, song.subs );
-		}
-		else
-			resolve( false );
-	});
+		loadSubs( audioEl, song.subs );
+	}
+	else
+		return false;
 }
 
 /**
@@ -3201,6 +3220,7 @@ async function retrieveBackgrounds() {
  * Retrieve metadata for files in the play queue
  */
 async function retrieveMetadata() {
+
 	// leave when we already have enough concurrent requests pending
 	if ( waitingMetadata >= MAX_METADATA_REQUESTS )
 		return;
@@ -3210,47 +3230,44 @@ async function retrieveMetadata() {
 
 	if ( queueItem ) {
 
-		let uri    = queueItem.dataset.file,
-			revoke = false;
+		let uri    = queueItem.dataset.file;
+		let file;
 
 		waitingMetadata++;
 		delete queueItem.dataset.retrieve;
+		let metadata;
 
-		queryMetadata: {
-			if ( queueItem.handle ) {
-				try {
-					if ( await queueItem.handle.requestPermission() != 'granted' )
-						break queryMetadata;
+		if ( queueItem.handle ) {
+			// Fetch metadata from File object
+			if ( await queueItem.handle.requestPermission() !== 'granted' )
+				return;
 
-					uri = URL.createObjectURL( await queueItem.handle.getFile() );
-					revoke = true;
-				}
-				catch( e ) {
-					break queryMetadata;
-				}
+			file = await queueItem.handle.getFile();
+			uri = URL.createObjectURL( file );
+			metadata = await parseBlob( file, { skipPostHeaders: true } );
+		} else {
+			// Fetch metadata from URI
+			const response = await fetch(uri);
+			if (response.body) {
+				metadata = await parseWebStream( response.body, { skipPostHeaders: true } );
+			} else {
+				throw new Error('Failed to stream response.body');
 			}
+		}
 
-			try {
-				const metadata = await mm.fetchFromUrl( uri, { skipPostHeaders: true } );
-				if ( metadata ) {
-					addMetadata( metadata, queueItem ); // add metadata to play queue item
-					syncMetadataToAudioElements( queueItem );
-					if ( ! queueItem.handle && ! ( metadata.common.picture && metadata.common.picture.length ) ) {
-						getFolderCover( uri ).then( cover => {
-							queueItem.dataset.cover = cover;
-							syncMetadataToAudioElements( queueItem );
-						});
-					}
-				}
-			}
-			catch( e ) {}
+		addMetadata( metadata, queueItem ); // add metadata to play queue item
+		syncMetadataToAudioElements( queueItem );
+		if ( ! queueItem.handle && ! ( metadata.common.picture && metadata.common.picture.length ) ) {
+			queueItem.dataset.cover = await getFolderCover( uri );
+			syncMetadataToAudioElements( queueItem );
+		}
 
-			if ( revoke )
-				URL.revokeObjectURL( uri );
+		if ( file ) {
+			URL.revokeObjectURL( uri );
 		}
 
 		waitingMetadata--;
-		retrieveMetadata(); // call again to continue processing the queue
+		await retrieveMetadata(); // call again to continue processing the queue
 	}
 }
 
