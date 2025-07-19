@@ -7,15 +7,15 @@
   "description": "Media player and real-time audio spectrum analyzer",
   "scripts": {
     "build": "webpack",
-    "start": "http-server",
-    "dev": "webpack serve --config webpack.dev.js"
+    "start": "npm run server",
+    "dev": "webpack serve --config webpack.dev.js",
+    "server": "node server/server.js"
   },
   "devDependencies": {
     "audiomotion-analyzer": "^5.0.0-beta.0",
     "buffer": "^6.0.3",
     "css-loader": "^7.1.4",
     "css-minimizer-webpack-plugin": "^8.0.0",
-    "http-server": "^14.1.1",
     "idb-keyval": "^6.3.0",
     "js-yaml": "^4.3.0",
     "mini-css-extract-plugin": "^2.10.2",
@@ -26,6 +26,9 @@
     "style-loader": "^4.0.0",
     "webpack": "^5.108.4",
     "webpack-cli": "^7.2.1",
-    "webpack-dev-server": "^6.0.0"
-  }
+    "webpack-dev-server": "^6.0.0",
+    "fastify": "^5.4.0",
+    "@fastify/static": "^8.2.0"
+  },
+  "type": "module"
 }
